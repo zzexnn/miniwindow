@@ -31,13 +31,15 @@ jobs:
           distribution: temurin
           java-version: '21'
 
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
+          log-accepted-android-sdk-licenses: 'false'
+
       - name: Install Android build components
         run: |
-          echo "ANDROID_HOME=${ANDROID_HOME}"
-          SDKMANAGER="$ANDROID_HOME/cmdline-tools/16.0/bin/sdkmanager"
-          test -x "$SDKMANAGER"
-          yes | "$SDKMANAGER" --licenses > /dev/null || true
-          "$SDKMANAGER" --install "platforms;android-37" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;4.1.2"
+          sdkmanager --install "platforms;android-37" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;4.1.2"
 
       - name: Apply minimal corner menu patch
         run: |
