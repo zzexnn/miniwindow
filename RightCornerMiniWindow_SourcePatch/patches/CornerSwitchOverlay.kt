@@ -23,6 +23,7 @@ import com.lsp.hypersidebar.util.HLog
 import org.json.JSONArray
 import kotlin.math.min
 import kotlin.math.cos
+import kotlin.math.sin
 
 /**
  * HyperSideBar-derived OS4 corner-mode replacement.
