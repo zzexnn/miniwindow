@@ -26,7 +26,7 @@ class CornerMenuEngine(
     var pageVersion: Int = 0
         private set
     private var portalReady: Boolean = true
-    private val angles = floatArrayOf(13f, 26f, 39f, 52f, 65f, 78f)
+    private val angles = floatArrayOf(78f, 65f, 52f, 39f, 26f, 13f)
 
     /** Screen-space icon center of one of the six slots. */
     fun center(index: Int): Pair<Float, Float> {

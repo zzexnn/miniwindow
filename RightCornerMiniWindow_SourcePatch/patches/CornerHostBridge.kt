@@ -17,7 +17,7 @@ object CornerHostBridge {
     private var context: Context? = null
 
     fun register(ctx: Context, prefs: SharedPreferences, status: () -> Bundle,
-                 test: (() -> String)? = null) {
+                 test: (() -> String)? = null, recover: (() -> String)? = null) {
         if (receiver != null) return
         val r = object : BroadcastReceiver() {
             override fun onReceive(c: Context, intent: Intent) {
@@ -31,7 +31,9 @@ object CornerHostBridge {
                     return
                 }
                 runCatching {
+                    val recovery = if (intent.getBooleanExtra(PrefKeys.CORNER_DIAG_RECOVER, false)) recover?.invoke() else null
                     val out = status()
+                    recovery?.let { out.putString("recovery", it) }
                     out.putInt("versionCode", BuildConfig.VERSION_CODE)
                     out.putString("version", BuildConfig.VERSION_NAME)
                     out.putString("process", android.app.Application.getProcessName())

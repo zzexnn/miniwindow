@@ -34,6 +34,9 @@ import com.lsp.hypersidebar.util.RelayToken
 import com.lsp.hypersidebar.util.RemotePrefsBridge
 import com.lsp.hypersidebar.util.SelfCheck
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
@@ -52,6 +55,8 @@ internal fun CornerMiniSettingsScreen(prefs: SharedPreferences) {
     var sysStatus by remember { mutableStateOf("尚未检测") }
     var uiStatus by remember { mutableStateOf("尚未检测") }
     var busy by remember { mutableStateOf(false) }
+    var restartResult by remember { mutableStateOf("") }
+    var restartBusy by remember { mutableStateOf(false) }
     var exportResult by remember { mutableStateOf("") }
     val frameworkConnected = RemotePrefsBridge.prefs != null && RemotePrefsBridge.service != null
 
@@ -62,7 +67,7 @@ internal fun CornerMiniSettingsScreen(prefs: SharedPreferences) {
                 prefs.savePref(PrefKeys.CORNER_SWIPE_ENABLED, true)
             }
             ConfigSync.notifyConfigChanged("corner settings opened")
-            sysStatus = probeCornerHost(context, prefs, HostPackages.SYSTEM_UI)
+            sysStatus = probeCornerHost(context, prefs, HostPackages.SYSTEM_UI, recover = true)
             uiStatus = probeCornerHost(context, prefs, HostPackages.UI_HOST)
         }
     }
@@ -98,12 +103,12 @@ internal fun CornerMiniSettingsScreen(prefs: SharedPreferences) {
                     ItemRow("LSPosed 框架", if (frameworkConnected) "已连接" else "未连接：确认模块已启用，API ≥ 102，安装更新后重启设备") { }
                     ItemRow("输入端 · SystemUI", sysStatus) { }
                     ItemRow("执行端 · 安全中心", uiStatus) { }
-                    ItemRow("重新检测并同步配置", if (busy) "检测中…" else "核实当前 APK 的宿主响应、输入监视器与配置状态") {
+                    ItemRow("重新检测并同步配置", if (busy) "检测中…" else "同步配置并检查手势监听；必要时重新挂接监听") {
                         if (!busy) scope.launch {
                             busy = true
                             try {
                                 ConfigSync.notifyConfigChanged("manual corner diagnosis")
-                                sysStatus = probeCornerHost(context, prefs, HostPackages.SYSTEM_UI)
+                                sysStatus = probeCornerHost(context, prefs, HostPackages.SYSTEM_UI, recover = true)
                                 uiStatus = probeCornerHost(context, prefs, HostPackages.UI_HOST)
                             } finally { busy = false }
                         }
@@ -146,10 +151,28 @@ internal fun CornerMiniSettingsScreen(prefs: SharedPreferences) {
                         haptic = !haptic
                         prefs.savePref(PrefKeys.CORNER_HAPTIC, haptic)
                     }
-                    ItemRow("手势灵敏度", "${sensitivity}dp · 点击切换（8 高 / 12 标准 / 18 低）") {
+                    ItemRow("手势灵敏度", "${when { sensitivity <= 8 -> "高"; sensitivity >= 18 -> "稳健"; else -> "标准" }} · 点击切换") {
                         sensitivity = when (sensitivity) { 8 -> 12; 12 -> 18; else -> 8 }
                         prefs.savePref(PrefKeys.CORNER_SENSITIVITY_DP, sensitivity)
                     }
+                    ItemRow("重启系统界面", if (restartBusy) "正在重启并检查状态…" else "点击后会短暂黑屏，系统会自动恢复；需要 Root 授权") {
+                        if (!restartBusy && !busy) scope.launch {
+                            restartBusy = true
+                            restartResult = "正在请求 Root 授权…"
+                            try {
+                                val result = withContext(Dispatchers.IO) { HostRestarter.restartSystemUi() }
+                                restartResult = if (result.allOk) "已发送重启请求，正在等待系统界面恢复" else "重启失败：${result.failed.joinToString()}"
+                                if (result.allOk) {
+                                    delay(6_000L)
+                                    ConfigSync.notifyConfigChanged("SystemUI restarted by user")
+                                    sysStatus = probeCornerHost(context, prefs, HostPackages.SYSTEM_UI, recover = true)
+                                    uiStatus = probeCornerHost(context, prefs, HostPackages.UI_HOST)
+                                    restartResult = if (sysStatus.startsWith("当前版本已激活")) "系统界面已恢复，当前版本已激活" else "已发送重启请求；请到诊断信息检查恢复状态"
+                                }
+                            } finally { restartBusy = false }
+                        }
+                    }
+                    if (restartResult.isNotEmpty()) TextLine(restartResult, 13)
                     ItemRow("诊断信息", "宿主状态、菜单测试、日志、自检报告") { page = "diag" }
                     Spacer(Modifier.height(4.dp))
                     TextLine("从右下角向左上斜滑，保持按住，滑到应用后松手打开原生小窗。滑到文件夹原位切换收藏，滑到返回可切回推荐。支持横屏和竖屏。", 14)
@@ -162,11 +185,12 @@ internal fun CornerMiniSettingsScreen(prefs: SharedPreferences) {
 }
 
 private suspend fun probeCornerHost(context: Context, prefs: SharedPreferences, pkg: String,
-                                    test: Boolean = false): String =
+                                    test: Boolean = false, recover: Boolean = false): String =
     withTimeoutOrNull(3_000L) {
         suspendCancellableCoroutine { continuation ->
             val intent = Intent(PrefKeys.CORNER_DIAG_ACTION).setPackage(pkg)
                 .putExtra(PrefKeys.CORNER_DIAG_TEST, test)
+                .putExtra(PrefKeys.CORNER_DIAG_RECOVER, recover)
             RelayToken.attach(intent, RelayToken.read(prefs))
             runCatching {
                 context.sendOrderedBroadcast(intent, null, object : BroadcastReceiver() {
@@ -179,6 +203,7 @@ private suspend fun probeCornerHost(context: Context, prefs: SharedPreferences, 
                             e?.getInt("versionCode") != BuildConfig.VERSION_CODE || e.getString("version") != BuildConfig.VERSION_NAME || e.getString("build") != BuildConfig.CORNER_BUILD_ID -> "宿主仍是旧版 APK，请重启设备"
                             else -> "当前版本已激活 ${e.getString("version")}\n" +
                                 e.getString("detail").orEmpty() +
+                                e.getString("recovery")?.let { "\n$it" }.orEmpty() +
                                 if (test) "\n${e.getString("test")}" else ""
                         }
                         continuation.resume(message)

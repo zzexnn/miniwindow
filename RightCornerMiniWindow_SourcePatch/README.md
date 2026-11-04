@@ -1,3 +1,7 @@
+# V0.3.0-test
+
+本轮触发、参考图外观和重启入口改进见 [CHANGELOG_V0.3.md](CHANGELOG_V0.3.md)。
+
 # V0.2.0-test
 
 最新修复、安装说明和真机验收边界见 [CHANGELOG_V0.2.md](CHANGELOG_V0.2.md)。

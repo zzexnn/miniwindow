@@ -184,3 +184,4 @@ print('Favorite apps use the retained app-picker under 自定义收藏; capped a
 
 # Keep V0.2 repairs separate so every edit is checked against the pinned V0.1 output.
 exec(compile((SRC.parent / "apply_fixes.py").read_text(encoding="utf-8"), str(SRC.parent / "apply_fixes.py"), "exec"))
+exec(compile((SRC.parent / "apply_v03.py").read_text(encoding="utf-8"), str(SRC.parent / "apply_v03.py"), "exec"))
