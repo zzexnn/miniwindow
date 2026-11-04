@@ -16,17 +16,17 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout miniwindow patches
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Checkout pinned HyperSideBar base
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: mikudayoooooooo/HyperSideBar
           ref: e45661e0f2f51bac84d00f954ad2da0edf1c24e3
           path: upstream
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
@@ -37,13 +37,14 @@ jobs:
           packages: 'platform-tools'
           log-accepted-android-sdk-licenses: 'false'
 
-      - name: Install Android build components
+      - name: Install Android 17 SDK and native toolchain
         run: |
-          sdkmanager --install "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;4.1.2"
-
-      - name: Use available compile SDK for CI
-        run: |
-          sed -i 's/compileSdk = 37/compileSdk = 36/' upstream/app/build.gradle.kts
+          sdkmanager --install "platforms;android-37.0" "build-tools;37.0.0" "ndk;27.2.12479018" "cmake;4.1.2"
+          test -f "$ANDROID_HOME/platforms/android-37.0/android.jar"
+          # Some AGP versions look up android-37 instead of android-37.0.
+          if [ ! -e "$ANDROID_HOME/platforms/android-37" ]; then
+            ln -s "$ANDROID_HOME/platforms/android-37.0" "$ANDROID_HOME/platforms/android-37"
+          fi
 
       - name: Apply minimal corner menu patch
         run: |
