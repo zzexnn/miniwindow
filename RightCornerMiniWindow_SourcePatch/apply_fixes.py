@@ -52,7 +52,7 @@ replace(spy, 'val dm = android.content.res.Resources.getSystem().displayMetrics\
 replace(turbo, '        if (!b2Enabled() && !cornerFallbackOwned()) return\n',
         '        if (!cornerInputEnabled()) { cornerSwitchMenu.dismiss(); return }\n')
 replace(turbo, '    internal fun b2Enabled(): Boolean =',
-        '    internal fun cornerInputEnabled(): Boolean = moduleEnabled() && cornerSwipeEnabled() && !breaker.open && !DataDeadState.dead\n\n    internal fun b2Enabled(): Boolean =')
+        '    internal fun cornerInputEnabled(): Boolean = moduleEnabled() && cornerSwipeEnabled() && !breaker.open\n\n    internal fun b2Enabled(): Boolean =')
 replace(hook + 'RelayGestureSink.kt',
         'val allowed = if (cornerStream) o.b2Enabled() || o.cornerFallbackOwned() else o.b2Enabled()',
         'val allowed = if (cornerStream) o.cornerInputEnabled() else o.b2Enabled()')
@@ -74,7 +74,7 @@ b = s.index('\n    private fun isLandscape(view: View)', a)
 s = s[:a]+'''    private fun postShowCornerFan(ctx: Context, ev: MotionEvent) {
         // Corner side was fixed on DOWN. MOVE may legitimately cross the screen midpoint.
         check(android.os.Looper.myLooper() == android.os.Looper.getMainLooper())
-        val frozenSource = ForegroundSourceProbe.capture(HostPackages.UI_HOST)
+        val frozenSource = runCatching { ForegroundSourceProbe.capture(HostPackages.UI_HOST) }.getOrNull()
         runCatching {
             if (cornerSwitchMenu.show(ctx, frozenSource)) cornerSwitchMenu.handle(ev)
         }.onFailure { HLog.w(TAG, "RCM_020 show failed: ${it.message}") }
@@ -97,7 +97,7 @@ replace(turbo, '        runCatching { RelayGestureSink.rearmHostSide(ctx) }',
         '''        CornerHostBridge.register(ctx, remotePrefs, status = {
             android.os.Bundle().apply {
                 putBoolean("ready", cornerInputEnabled())
-                putString("detail", "执行端已注入；可接收角区流=${cornerInputEnabled()}；OS4标记=$isOs4Sidebar；最近手势=$cornerSeq；窗口错误=${cornerSwitchMenu.lastError ?: "无"}")
+                putString("detail", "执行端已注入；可接收角区流=${cornerInputEnabled()}；推荐数据源失效=${DataDeadState.dead}（收藏独立可用）；OS4标记=$isOs4Sidebar；最近手势=$cornerSeq；窗口错误=${cornerSwitchMenu.lastError ?: "无"}")
             }
         }, test = { cornerSwitchMenu.test(ctx) })
         runCatching { RelayGestureSink.rearmHostSide(ctx) }''')
@@ -255,3 +255,57 @@ replace(spy, '        val zone = tr.zone\n',
         '            pendingMove?.recycle()\n'
         '            pendingMove = null\n'
         '        }\n')
+# Partial writes used to replace hsb.conf: pushBand erased all preceding corner settings.
+util='app/src/main/java/com/lsp/hypersidebar/util/'
+shutil.copyfile(SRC/'NativeConfigValues.kt', ROOT/util/'NativeConfigValues.kt')
+shutil.copyfile(SRC.parent/'tests/NativeConfigValuesTest.kt',
+                ROOT/'app/src/test/java/com/lsp/hypersidebar/util/NativeConfigValuesTest.kt')
+replace(util+'ConfigFileBridge.kt', '    private const val CONF_NAME = "hsb.conf"',
+        '    private const val CONF_NAME = "hsb.conf"\n    private val scalarValues = NativeConfigValues()')
+replace(util+'ConfigFileBridge.kt', '    fun pushScalars(entries: Map<String, Any>): Boolean {',
+        '    @Synchronized fun pushScalars(entries: Map<String, Any>): Boolean {')
+replace(util+'ConfigFileBridge.kt', '        val body = buildString {',
+        '        val merged = scalarValues.merge(entries)\n        val body = buildString {')
+replace(util+'ConfigFileBridge.kt', '            entries.forEach { (k, v) ->',
+        '            merged.forEach { (k, v) ->')
+# There is no side-strip consumer in this product; disable its native suppression as well.
+# hsb_band_geom treats width=0 as an invalid/disabled band and passes normal Back through.
+replace(util+'CornerGeomBridge.kt', '            PROP_BAND_W_PX to f(g.wPx),',
+        '            PROP_BAND_W_PX to "0", // Right-corner-only build: preserve native side Back')
+# Do not leave a competing legacy fan/touch hook installed on Java-based tablet launchers.
+f=ROOT/xposed
+s=f.read_text()
+a=s.index('            Host.HOME -> {')
+b=s.index('            Host.SYSTEM_UI -> {', a)
+s=s[:a]+'''            Host.HOME -> {
+                HLog.i(TAG, "RCM_020 launcher native entry retained; legacy Java fan input disabled")
+            }
+'''+s[b:]
+f.write_text(s)
+replace(turbo, '''        listOf(
+            { hookOnTouch() },
+            { hookCoverPassThrough() },
+            { hookCoverLifecycleFlags() },
+            { hookHideWhiteBar() },
+            { hookHandleBarPixelKill() }
+        ).forEach''', '        listOf<() -> Unit>().forEach')
+replace(turbo, '''            listOf(
+                { hookOnTouch() },
+                { hookCoverPassThrough() },
+                { hookHideWhiteBar() }
+            ).forEach''', '            listOf<() -> Unit>().forEach')
+# Different APKs can share versionCode on the same date; identify the exact build in probes.
+replace('app/build.gradle.kts', '        buildConfigField("String", "XPOSED_API_VERSION",',
+        '        buildConfigField("String", "CORNER_BUILD_ID", "\\\"${System.getenv("GITHUB_SHA") ?: "local"}\\\"")\n'
+        '        buildConfigField("String", "XPOSED_API_VERSION",')
+replace(hook+'CornerHostBridge.kt', '                    out.putString("version", BuildConfig.VERSION_NAME)',
+        '                    out.putString("version", BuildConfig.VERSION_NAME)\n'
+        '                    out.putString("build", BuildConfig.CORNER_BUILD_ID)')
+replace(spy, '                        e.getString("version") == com.lsp.hypersidebar.BuildConfig.VERSION_NAME &&',
+        '                        e.getString("version") == com.lsp.hypersidebar.BuildConfig.VERSION_NAME &&\n'
+        '                        e.getString("build") == com.lsp.hypersidebar.BuildConfig.CORNER_BUILD_ID &&')
+replace(xposed, 'RCM_020 INJECTED version=${BuildConfig.VERSION_NAME}',
+        'RCM_020 INJECTED build=${BuildConfig.CORNER_BUILD_ID} version=${BuildConfig.VERSION_NAME}')
+for rel in [util+'ConfigFileBridge.kt', util+'CornerGeomBridge.kt']:
+    f=ROOT/rel
+    f.write_text('// Modified for RightCornerMiniWindow V0.2; see assets/RightCornerMiniWindow_NOTICE.\n'+f.read_text())

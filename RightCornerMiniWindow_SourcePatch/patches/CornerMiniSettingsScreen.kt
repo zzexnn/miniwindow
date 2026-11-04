@@ -94,7 +94,7 @@ internal fun CornerMiniSettingsScreen(prefs: SharedPreferences) {
             else -> Column(Modifier.weight(1f).verticalScroll(rememberScrollState())
                 .padding(horizontal = 18.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 if (page == "diag") {
-                    TextLine("当前版本 ${BuildConfig.VERSION_NAME} / ${BuildConfig.VERSION_CODE}", 13)
+                    TextLine("当前版本 ${BuildConfig.VERSION_NAME} / ${BuildConfig.VERSION_CODE} / ${BuildConfig.CORNER_BUILD_ID.take(7)}", 13)
                     ItemRow("LSPosed 框架", if (frameworkConnected) "已连接" else "未连接：确认模块已启用，API ≥ 102，安装更新后重启设备") { }
                     ItemRow("输入端 · SystemUI", sysStatus) { }
                     ItemRow("执行端 · 安全中心", uiStatus) { }
@@ -176,7 +176,7 @@ private suspend fun probeCornerHost(context: Context, prefs: SharedPreferences, 
                         val message = when {
                             resultCode == PrefKeys.PROBE_CODE_TOKEN_MISMATCH -> resultData ?: "配置未同步"
                             resultCode != PrefKeys.PROBE_CODE_OK -> resultData ?: "无响应：尚未注入、宿主未启动或仍在运行旧版 APK"
-                            e?.getInt("versionCode") != BuildConfig.VERSION_CODE || e.getString("version") != BuildConfig.VERSION_NAME -> "宿主仍是旧版 APK，请重启设备"
+                            e?.getInt("versionCode") != BuildConfig.VERSION_CODE || e.getString("version") != BuildConfig.VERSION_NAME || e.getString("build") != BuildConfig.CORNER_BUILD_ID -> "宿主仍是旧版 APK，请重启设备"
                             else -> "当前版本已激活 ${e.getString("version")}\n" +
                                 e.getString("detail").orEmpty() +
                                 if (test) "\n${e.getString("test")}" else ""
