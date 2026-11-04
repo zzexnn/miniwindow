@@ -39,7 +39,11 @@ jobs:
 
       - name: Install Android build components
         run: |
-          sdkmanager --install "platforms;android-37" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;4.1.2"
+          sdkmanager --install "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;4.1.2"
+
+      - name: Use available compile SDK for CI
+        run: |
+          sed -i 's/compileSdk = 37/compileSdk = 36/' upstream/app/build.gradle.kts
 
       - name: Apply minimal corner menu patch
         run: |
