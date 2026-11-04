@@ -148,7 +148,7 @@ replace(build,
     'applicationId = "io.github.zzexnn.rightcornermini"')
 replace(build,
     'versionName = "2.3.1"',
-    'versionName = "0.1.0-test"')
+    'versionName = "0.2.0-test"')
 
 strings = 'app/src/main/res/values/strings.xml'
 replace(strings,
@@ -181,3 +181,6 @@ replace('app/src/main/java/com/lsp/hypersidebar/MainActivity.kt',
 # CUSTOM_APPS/CUSTOM_APPS_ORDER selection and cross-process sync can be reused.
 print('\nPatch applied. Build with ./gradlew assembleDebug on an Android-enabled machine.')
 print('Favorite apps use the retained app-picker under 自定义收藏; capped at five in corner menu.')
+
+# Keep V0.2 repairs separate so every edit is checked against the pinned V0.1 output.
+exec(compile((SRC.parent / "apply_fixes.py").read_text(encoding="utf-8"), str(SRC.parent / "apply_fixes.py"), "exec"))

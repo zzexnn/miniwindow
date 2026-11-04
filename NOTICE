@@ -1,0 +1,6 @@
+RightCornerMiniWindow is derived from HyperSideBar.
+Upstream: https://github.com/mikudayoooooooo/HyperSideBar
+Pinned upstream commit: e45661e0f2f51bac84d00f954ad2da0edf1c24e3
+License: Apache License, Version 2.0 (see LICENSE).
+Changes: right-corner single-ring navigation, minimal settings, tablet gesture and diagnostic repairs.
+Upstream source headers, notices and third-party dependencies are retained in CI checkout.

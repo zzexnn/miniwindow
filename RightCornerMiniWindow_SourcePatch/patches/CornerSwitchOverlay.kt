@@ -53,40 +53,78 @@ class CornerSwitchOverlay(private val prefs: SharedPreferences) {
             .take(5)
     }
 
-    fun show(context: Context, source: String?) {
-        if (screen != null || context.resources.configuration.orientation != Configuration.ORIENTATION_PORTRAIT) return
-        ctx = context
-        // Every invocation freezes the lists for the entire continuous gesture.
+    var lastError: String? = null
+        private set
+    private var previewOnly = false
+
+    fun show(context: Context, source: String?, preview: Boolean = false): Boolean {
+        if (screen != null) return false
+        lastError = null
+        previewOnly = preview
         favorites = customApps()
         suggestions = DataLoader.rankedApps(context, source).asSequence()
-            .filter { it.isNotBlank() && it !in favorites }
-            .distinct()
-            .take(5)
-            .toList()
-        val visual = CornerVisual(context, suggestions, favorites,
-            haptic = prefs.getBoolean("corner_haptic", true))
-        val manager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        val lp = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT,
+            .filter { it.isNotBlank() }.distinct().take(5).toList()
+        // Keep upstream's 2038 WindowManager route; a visual context supplies real display bounds.
+        // On system-uid hosts only, try the legacy system window if AppOps rejects 2038.
+        val types = if (android.os.Process.myUid() == 1000) listOf(
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
-            android.graphics.PixelFormat.TRANSLUCENT
-        ).apply { gravity = android.view.Gravity.TOP or android.view.Gravity.START }
-        try {
-            manager.addView(visual, lp)
-            wm = manager
-            screen = visual
-            armTimeout()
-            HLog.i("CornerSwitch", "menu shown suggestions=${suggestions.size} favorites=${favorites.size}")
-        } catch (failure: Throwable) {
-            runCatching { manager.removeViewImmediate(visual) }
-            ctx = null
-            HLog.w("CornerSwitch", "window creation failed: ${failure.message}")
+            WindowManager.LayoutParams.TYPE_SYSTEM_ALERT
+        ) else listOf(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY)
+        for (type in types) {
+            var manager: WindowManager? = null
+            var visual: CornerVisual? = null
+            try {
+                val display = context.getSystemService(android.hardware.display.DisplayManager::class.java)
+                    ?.getDisplay(android.view.Display.DEFAULT_DISPLAY) ?: error("Primary display unavailable")
+                val windowContext = context.createWindowContext(display, type, null)
+                val activeManager = windowContext.getSystemService(WindowManager::class.java) ?: error("WindowManager unavailable")
+                manager = activeManager
+                val activeVisual = CornerVisual(windowContext, suggestions, favorites,
+                    haptic = prefs.getBoolean(PrefKeys.CORNER_HAPTIC, true),
+                    onRotation = { dismiss() })
+                visual = activeVisual
+                val lp = WindowManager.LayoutParams(
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.MATCH_PARENT, type,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                        WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+                    android.graphics.PixelFormat.TRANSLUCENT
+                ).apply {
+                    gravity = android.view.Gravity.TOP or android.view.Gravity.START
+                    title = "RightCornerMiniWindow"
+                    setFitInsetsTypes(0)
+                    layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                    // Below Android's maximum untrusted overlay opacity; the window never owns input.
+                    alpha = 0.8f
+                }
+                activeManager.addView(activeVisual, lp)
+                ctx = windowContext
+                wm = activeManager
+                screen = activeVisual
+                armTimeout()
+                lastError = null
+                HLog.i("CornerSwitch", "RCM_020 menu shown type=$type preview=$preview suggestions=${suggestions.size} favorites=${favorites.size}")
+                return true
+            } catch (failure: Throwable) {
+                if (visual != null) runCatching { manager?.removeViewImmediate(visual) }
+                lastError = "type=$type ${failure.javaClass.simpleName}: ${failure.message}"
+                HLog.w("CornerSwitch", "window creation failed: $lastError")
+            }
         }
+        dismiss()
+        return false
+    }
+
+    fun test(context: Context): String {
+        if (isShowing) return "已有手势菜单；结束本次手势后重试"
+        val shown = show(context, null, preview = true)
+        if (shown) {
+            handler.removeCallbacks(timeout)
+            handler.postDelayed(timeout, 5_000L)
+        }
+        return if (shown) "菜单窗口已创建（5 秒后关闭；预览不会启动应用）" else "菜单窗口创建失败：$lastError"
     }
 
     private fun armTimeout() {
@@ -96,12 +134,14 @@ class CornerSwitchOverlay(private val prefs: SharedPreferences) {
 
     fun handle(event: MotionEvent) {
         val v = screen ?: return
+        if (previewOnly) return
         when (event.actionMasked) {
             MotionEvent.ACTION_MOVE -> {
                 v.move(event.rawX, event.rawY)
                 armTimeout()
             }
             MotionEvent.ACTION_UP -> {
+                v.move(event.rawX, event.rawY)
                 val selected = v.release(event.rawX, event.rawY)
                 val pkg = when (selected?.page) {
                     CornerMenuEngine.Page.SUGGESTIONS -> suggestions.getOrNull(selected.index)
@@ -129,25 +169,28 @@ class CornerSwitchOverlay(private val prefs: SharedPreferences) {
         ctx = null
         suggestions = emptyList()
         favorites = emptyList()
+        previewOnly = false
     }
 
     private class CornerVisual(
         context: Context,
         private val suggestions: List<String>,
         private val favorites: List<String>,
-        private val haptic: Boolean
+        private val haptic: Boolean,
+        private val onRotation: () -> Unit
     ) : View(context) {
-        private val density = resources.displayMetrics.density
+        private val display = CornerRuntime.metrics(context)
+        private val density = display.density
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
         private val iconCache = HashMap<String, Drawable?>()
         private val windowLocation = IntArray(2)
         // Engine uses raw screen coordinates. The overlay may be inset by SystemUI;
         // translating during draw only avoids page resets before its first layout.
         private val engine = CornerMenuEngine(
-            radius = min(226f * density, resources.displayMetrics.widthPixels * 0.68f),
+            radius = min(226f * density, display.widthPixels * 0.68f),
             hitRadius = 36f * density,
-            anchorX = resources.displayMetrics.widthPixels.toFloat(),
-            anchorY = resources.displayMetrics.heightPixels.toFloat()
+            anchorX = display.widthPixels.toFloat(),
+            anchorY = display.heightPixels.toFloat()
         )
         private val iconRadius = 21f * density
 
@@ -169,15 +212,20 @@ class CornerSwitchOverlay(private val prefs: SharedPreferences) {
             return engine.release(rawX, rawY)
         }
 
+        override fun onConfigurationChanged(newConfig: Configuration) {
+            super.onConfigurationChanged(newConfig)
+            onRotation()
+        }
+
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
             getLocationOnScreen(windowLocation)
             val e = engine
             val slots = if (e.page == CornerMenuEngine.Page.SUGGESTIONS) suggestions else favorites
-            val r = min(226f * density, resources.displayMetrics.widthPixels * 0.68f)
+            val r = min(226f * density, display.widthPixels * 0.68f)
             // Continuous quarter-annulus, not a rectangular toolbar or popup.
-            val centerX = resources.displayMetrics.widthPixels - windowLocation[0].toFloat()
-            val centerY = resources.displayMetrics.heightPixels - windowLocation[1].toFloat()
+            val centerX = display.widthPixels - windowLocation[0].toFloat()
+            val centerY = display.heightPixels - windowLocation[1].toFloat()
             val inner = r - 36f * density
             val outer = r + 37f * density
             val wedge = Path().apply {

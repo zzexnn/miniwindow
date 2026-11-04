@@ -12,7 +12,7 @@ permissions:
 jobs:
   build:
     name: Build HyperOS 4 debug APK
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - name: Checkout miniwindow patches
@@ -54,11 +54,32 @@ jobs:
         working-directory: upstream
         run: |
           chmod +x gradlew
-          ./gradlew --no-daemon --stacktrace assembleDebug
+          ./gradlew --no-daemon --stacktrace :app:testDebugUnitTest :app:assembleDebug --console=plain
+
+      - name: Verify module entry and 16KB compatibility
+        run: |
+          python3 RightCornerMiniWindow_SourcePatch/tests/verify_apk.py upstream/app/build/outputs/apk/debug/app-debug.apk
+          "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --verbose --print-certs upstream/app/build/outputs/apk/debug/app-debug.apk
+          sha256sum upstream/app/build/outputs/apk/debug/app-debug.apk > upstream/app/build/outputs/apk/debug/SHA256SUMS.txt
+          python3 - <<'PYTEST'
+          import glob, xml.etree.ElementTree as E
+          suites=[E.parse(p).getroot() for p in glob.glob('upstream/app/build/test-results/testDebugUnitTest/TEST-*.xml')]
+          print('JUnit:', {k:sum(int(s.get(k,0)) for s in suites) for k in ('tests','failures','errors','skipped')})
+          PYTEST
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RightCornerMiniWindow-test-reports
+          path: upstream/app/build/reports/tests/testDebugUnitTest/
+          if-no-files-found: ignore
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: RightCornerMiniWindow-HyperOS4-test-apk
-          path: upstream/app/build/outputs/apk/debug/*.apk
+          path: |
+            upstream/app/build/outputs/apk/debug/*.apk
+            upstream/app/build/outputs/apk/debug/SHA256SUMS.txt
           if-no-files-found: error
