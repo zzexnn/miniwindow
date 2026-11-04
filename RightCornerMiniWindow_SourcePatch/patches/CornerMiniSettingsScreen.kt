@@ -67,7 +67,7 @@ internal fun CornerMiniSettingsScreen(prefs: SharedPreferences) {
                 prefs.savePref(PrefKeys.CORNER_SWIPE_ENABLED, true)
             }
             ConfigSync.notifyConfigChanged("corner settings opened")
-            sysStatus = probeCornerHost(context, prefs, HostPackages.SYSTEM_UI, recover = true)
+            sysStatus = probeCornerHost(context, prefs, HostPackages.SYSTEM_UI)
             uiStatus = probeCornerHost(context, prefs, HostPackages.UI_HOST)
         }
     }
@@ -103,21 +103,14 @@ internal fun CornerMiniSettingsScreen(prefs: SharedPreferences) {
                     ItemRow("LSPosed 框架", if (frameworkConnected) "已连接" else "未连接：确认模块已启用，API ≥ 102，安装更新后重启设备") { }
                     ItemRow("输入端 · SystemUI", sysStatus) { }
                     ItemRow("执行端 · 安全中心", uiStatus) { }
-                    ItemRow("重新检测并同步配置", if (busy) "检测中…" else "同步配置并检查手势监听；必要时重新挂接监听") {
+                    ItemRow("重新检测并同步配置", if (busy) "检测中…" else "同步配置并读取宿主当前加载版本") {
                         if (!busy) scope.launch {
                             busy = true
                             try {
                                 ConfigSync.notifyConfigChanged("manual corner diagnosis")
-                                sysStatus = probeCornerHost(context, prefs, HostPackages.SYSTEM_UI, recover = true)
+                                sysStatus = probeCornerHost(context, prefs, HostPackages.SYSTEM_UI)
                                 uiStatus = probeCornerHost(context, prefs, HostPackages.UI_HOST)
                             } finally { busy = false }
-                        }
-                    }
-                    ItemRow("测试宿主菜单", "显示 5 秒，仅检查窗口能否创建，不启动应用") {
-                        if (!busy) scope.launch {
-                            busy = true
-                            try { uiStatus = probeCornerHost(context, prefs, HostPackages.UI_HOST, test = true) }
-                            finally { busy = false }
                         }
                     }
                     ItemRow("导出自检报告", if (busy) "处理中…" else "包含三宿主日志、配置状态和 Native 检测；保存至下载目录") {
@@ -138,7 +131,7 @@ internal fun CornerMiniSettingsScreen(prefs: SharedPreferences) {
                 } else {
                     ItemRow("LSPosed 状态", when {
                         !frameworkConnected -> "框架未连接；点此查看排查方法"
-                        sysStatus.startsWith("当前版本已激活") && uiStatus.startsWith("当前版本已激活") -> "当前版本已激活：SystemUI + 安全中心；点此查看手势链路"
+                        sysStatus.startsWith("当前版本已加载") && uiStatus.startsWith("当前版本已加载") -> "当前版本已加载：SystemUI + 安全中心；点此查看详情"
                         else -> "框架已连接；宿主尚未确认，点此查看检测结果"
                     }) { page = "diag" }
                     ItemRow("启用右下角手势", if (enabled) "已开启" else "已关闭") {
@@ -165,15 +158,15 @@ internal fun CornerMiniSettingsScreen(prefs: SharedPreferences) {
                                 if (result.allOk) {
                                     delay(6_000L)
                                     ConfigSync.notifyConfigChanged("SystemUI restarted by user")
-                                    sysStatus = probeCornerHost(context, prefs, HostPackages.SYSTEM_UI, recover = true)
+                                    sysStatus = probeCornerHost(context, prefs, HostPackages.SYSTEM_UI)
                                     uiStatus = probeCornerHost(context, prefs, HostPackages.UI_HOST)
-                                    restartResult = if (sysStatus.startsWith("当前版本已激活")) "系统界面已恢复，当前版本已激活" else "已发送重启请求；请到诊断信息检查恢复状态"
+                                    restartResult = if (sysStatus.startsWith("当前版本已加载")) "系统界面已恢复，当前版本已加载" else "已发送重启请求；请到诊断信息检查恢复状态"
                                 }
                             } finally { restartBusy = false }
                         }
                     }
                     if (restartResult.isNotEmpty()) TextLine(restartResult, 13)
-                    ItemRow("诊断信息", "宿主状态、菜单测试、日志、自检报告") { page = "diag" }
+                    ItemRow("诊断信息", "宿主版本、日志、自检报告") { page = "diag" }
                     Spacer(Modifier.height(4.dp))
                     TextLine("从右下角向左上斜滑，保持按住，滑到应用后松手打开原生小窗。滑到文件夹原位切换收藏，滑到返回可切回推荐。支持横屏和竖屏。", 14)
                     TextLine("${BuildConfig.VERSION_NAME} · 测试版；设备兼容性仍需真机验证。", 12)
@@ -185,12 +178,10 @@ internal fun CornerMiniSettingsScreen(prefs: SharedPreferences) {
 }
 
 private suspend fun probeCornerHost(context: Context, prefs: SharedPreferences, pkg: String,
-                                    test: Boolean = false, recover: Boolean = false): String =
+                                    unused: Boolean = false): String =
     withTimeoutOrNull(3_000L) {
         suspendCancellableCoroutine { continuation ->
             val intent = Intent(PrefKeys.CORNER_DIAG_ACTION).setPackage(pkg)
-                .putExtra(PrefKeys.CORNER_DIAG_TEST, test)
-                .putExtra(PrefKeys.CORNER_DIAG_RECOVER, recover)
             RelayToken.attach(intent, RelayToken.read(prefs))
             runCatching {
                 context.sendOrderedBroadcast(intent, null, object : BroadcastReceiver() {
@@ -201,10 +192,9 @@ private suspend fun probeCornerHost(context: Context, prefs: SharedPreferences, 
                             resultCode == PrefKeys.PROBE_CODE_TOKEN_MISMATCH -> resultData ?: "配置未同步"
                             resultCode != PrefKeys.PROBE_CODE_OK -> resultData ?: "无响应：尚未注入、宿主未启动或仍在运行旧版 APK"
                             e?.getInt("versionCode") != BuildConfig.VERSION_CODE || e.getString("version") != BuildConfig.VERSION_NAME || e.getString("build") != BuildConfig.CORNER_BUILD_ID -> "宿主仍是旧版 APK，请重启设备"
-                            else -> "当前版本已激活 ${e.getString("version")}\n" +
+                            else -> "当前版本已加载 ${e.getString("version")}\n" +
                                 e.getString("detail").orEmpty() +
-                                e.getString("recovery")?.let { "\n$it" }.orEmpty() +
-                                if (test) "\n${e.getString("test")}" else ""
+                                ""
                         }
                         continuation.resume(message)
                     }

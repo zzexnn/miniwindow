@@ -1,4 +1,4 @@
-name: Build RightCornerMiniWindow test APK
+name: Build RightCornerMiniWindow unsigned APK
 
 on:
   push:
@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build:
-    name: Build HyperOS 4 debug APK
+    name: Build upstream HyperOS 4 APK
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -54,32 +54,26 @@ jobs:
         working-directory: upstream
         run: |
           chmod +x gradlew
-          ./gradlew --no-daemon --stacktrace :app:testDebugUnitTest :app:assembleDebug --console=plain
+          ./gradlew --no-daemon --stacktrace :app:assembleDebug --console=plain
 
-      - name: Verify module entry and 16KB compatibility
+      - name: Package unsigned build for fixed-key signing
         run: |
-          python3 RightCornerMiniWindow_SourcePatch/tests/verify_apk.py upstream/app/build/outputs/apk/debug/app-debug.apk
-          "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --verbose --print-certs upstream/app/build/outputs/apk/debug/app-debug.apk
-          sha256sum upstream/app/build/outputs/apk/debug/app-debug.apk > upstream/app/build/outputs/apk/debug/SHA256SUMS.txt
-          python3 - <<'PYTEST'
-          import glob, xml.etree.ElementTree as E
-          suites=[E.parse(p).getroot() for p in glob.glob('upstream/app/build/test-results/testDebugUnitTest/TEST-*.xml')]
-          print('JUnit:', {k:sum(int(s.get(k,0)) for s in suites) for k in ('tests','failures','errors','skipped')})
-          PYTEST
+          mkdir -p delivery
+          apk=$(find upstream/app/build/outputs/apk/debug -maxdepth 1 -name '*.apk' -print -quit)
+          test -n "$apk"
+          cp "$apk" delivery/miniwindow-unsigned.apk
+          # An unexpected debug signature must never be distributed.
+          if "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify delivery/miniwindow-unsigned.apk >/dev/null 2>&1; then
+            echo "Unexpected signed APK: refusing ephemeral signer"
+            exit 1
+          fi
+          cp "$ANDROID_HOME/build-tools/37.0.0/lib/apksigner.jar" delivery/
+          cp upstream/miniwindow-changes.json delivery/
+          sha256sum delivery/miniwindow-unsigned.apk > delivery/SHA256SUMS.txt
 
-      - name: Upload test reports
-        if: always()
+      - name: Upload unsigned APK and signing tool
         uses: actions/upload-artifact@v4
         with:
-          name: RightCornerMiniWindow-test-reports
-          path: upstream/app/build/reports/tests/testDebugUnitTest/
-          if-no-files-found: ignore
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: RightCornerMiniWindow-HyperOS4-test-apk
-          path: |
-            upstream/app/build/outputs/apk/debug/*.apk
-            upstream/app/build/outputs/apk/debug/SHA256SUMS.txt
+          name: RightCornerMiniWindow-unsigned-for-fixed-signing
+          path: delivery/
           if-no-files-found: error

@@ -1,187 +1,194 @@
 #!/usr/bin/env python3
-"""Apply the corner-first MVP to a clean HyperSideBar checkout.
-
-This preserves the upstream HyperOS 4 native and input monitor mechanisms.
-It does not automatically remove every upstream setting page or feature.
-
-Usage: python3 apply_patch.py /path/to/HyperSideBar
+"""Adapt pinned HyperSideBar e45661e, using its actual input/transport/window/launcher.
+V0.1–0.3 replacement triggers and overlays are retired and are never applied.
 """
 from pathlib import Path
-import re
+import hashlib
+import json
 import shutil
 import sys
 
-ROOT = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else None
-SRC = Path(__file__).resolve().parent / "patches"
-if ROOT is None or not (ROOT / 'app/src/main/java/com/lsp/hypersidebar/hook/TurboLayout.kt').is_file():
-    raise SystemExit('Usage: python3 apply_patch.py /path/to/HyperSideBar (clean master checkout)')
+ROOT = Path(sys.argv[1]).resolve()
+HERE = Path(__file__).resolve().parent
+K = 'app/src/main/java/com/lsp/hypersidebar/'
+changes = {}
 
+def edit(path, transform):
+    p = ROOT / path
+    before = p.read_text()
+    after = transform(before)
+    if before == after:
+        raise SystemExit('No change: ' + path)
+    changes.setdefault(path, {'before': hashlib.sha256(before.encode()).hexdigest()})
+    p.write_text(after)
 
-def replace(path, before, after, number=1):
-    f = ROOT / path
-    s = f.read_text(encoding='utf-8')
-    count = s.count(before)
-    if count != number:
-        raise SystemExit(f'Anchor mismatch in {path}: wanted {number}, found {count}. Stop safely; do not patch unknown revision.')
-    f.write_text(s.replace(before, after), encoding='utf-8')
-    print('patched', path)
+def replace(path, a, b, count=1):
+    def apply(s):
+        if s.count(a) != count:
+            raise SystemExit(f'Pinned-source anchor mismatch: {path}: {s.count(a)} != {count}')
+        return s.replace(a, b)
+    edit(path, apply)
 
-hook = 'app/src/main/java/com/lsp/hypersidebar/hook/'
-for name in ['CornerMenuEngine.kt', 'CornerSwitchOverlay.kt', 'CornerMiniSettingsScreen.kt']:
-    destination = hook if name != 'CornerMiniSettingsScreen.kt' else 'app/src/main/java/com/lsp/hypersidebar/ui/settings/'
-    target = ROOT / destination / name
-    if target.exists():
-        raise SystemExit(f'File already exists: {target}; stop to avoid overwriting.')
-    shutil.copyfile(SRC / name, target)
-    print('added', target.relative_to(ROOT))
+def copy(name, dest):
+    p = ROOT / (K + dest + name)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(HERE / 'patches' / name, p)
+    changes[str(p.relative_to(ROOT))] = {'added': True}
 
-turbo = hook + 'TurboLayout.kt'
-replace(turbo,
-    '    private var cSysPilfered = false\n',
-    '    private var cSysPilfered = false\n'
-    '    // Right-corner-only one-stroke suggestions -> custom favorites overlay.\n'
-    '    private val cornerSwitchMenu by lazy { CornerSwitchOverlay(remotePrefs) }\n')
+# CI must never issue an APK signed with a new runner's ephemeral debug key.
+build = 'app/build.gradle.kts'
+replace(build, 'applicationId = "io.github.mikudayoooooooo.hypersidebar"', 'applicationId = "io.github.zzexnn.rightcornermini"')
+replace(build, 'versionName = "2.3.1"', 'versionName = "0.4.0-upstream"')
+replace(build, 'versionCode = computedVersionCode', 'versionCode = 2_100_000_000 + (System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1)')
+replace(build, '    buildTypes {', '    buildTypes {\n        debug { signingConfig = null }')
+replace(build, '        testInstrumentationRunner =', '        buildConfigField("String", "CORNER_BUILD_ID", "\\"${System.getenv("GITHUB_SHA") ?: "local"}\\"")\n        testInstrumentationRunner =')
+for rel in ['app/src/main/cpp/hsb_config.c', 'app/src/main/cpp/hypersidebar_native.c']:
+    edit(rel, lambda s: s.replace('Android/media/io.github.mikudayoooooooo.hypersidebar/', 'Android/media/io.github.zzexnn.rightcornermini/'))
+replace('app/src/main/res/values/strings.xml', '<string name="app_name">hyperSidebar</string>', '<string name="app_name">右下角小窗</string>')
 
-replace(turbo,
-    '        if (!b2Enabled() && !cornerFallbackOwned()) return\n'
-    '        // fan 展示中',
-    '        if (!b2Enabled() && !cornerFallbackOwned()) return\n'
-    '        // Route later MOVE/UP/CANCEL to the new screen without creating a second touch owner.\n'
-    '        if (cornerSwitchMenu.isShowing) {\n'
-    '            cornerSwitchMenu.handle(ev)\n'
-    '            if (ev.actionMasked == MotionEvent.ACTION_UP || ev.actionMasked == MotionEvent.ACTION_CANCEL\n'
-    '                || ev.actionMasked == MotionEvent.ACTION_POINTER_DOWN) {\n'
-    '                cornerTrigger.reset()\n'
-    '                cornerEngaged = false\n'
-    '            }\n'
-    '            return\n'
-    '        }\n'
-    '        // fan 展示中')
-
-replace(turbo,
-    '                cornerEngaged = cornerSwipeEnabled()\n',
-    '                cornerEngaged = moduleEnabled() && cornerSwipeEnabled() &&\n'
-    '                    ev.rawX >= ctx.resources.displayMetrics.widthPixels *\n'
-    '                        (1f - GestureThresholds.CORNER_WIDTH_RATIO)\n')
-
-# HyperOS 4: UP before menu is attached must cancel the pending show,
-# not put the old fan controller into "released" mode.
-old = ('                    } else if (sPendingShow != null) {\n'
-       '                        // 快扫整包到达（1007 晚）：SHOW 已发但 fan 尚未落地时手指已抬起——\n'
-       '                        // 沿用"撤销排队 show"会让快扫永远白做（201757 导出：整段流压缩成\n'
-       '                        // DOWN+UP 一次到达）。落地转点选态：点图标直启、点空白/看门狗收。\n'
-       '                        fanController.markReleasedOnArrival()\n')
-new = ('                    } else if (sPendingShow != null) {\n'
-       '                        // Strict single continuous gesture: no lingering menu after UP.\n'
-       '                        cancelPendingStripShow()\n')
-replace(turbo, old, new)
-
-# Keep the existing post scheduling and cleanup, but replace its target.
-f = ROOT / turbo
-s = f.read_text(encoding='utf-8')
-start = s.index('    private fun postShowCornerFan(ctx: Context, ev: MotionEvent) {')
-end = s.index('\n    private fun isLandscape(view: View)', start)
-body = '''    private fun postShowCornerFan(ctx: Context, ev: MotionEvent) {
-        if (ev.rawX < ctx.resources.displayMetrics.widthPixels / 2f) return
-        val frozenSource = ForegroundSourceProbe.capture(HostPackages.UI_HOST)
-        val r = Runnable {
-            sPendingShow = null
-            runCatching { cornerSwitchMenu.show(ctx, frozenSource) }
-                .onFailure { HLog.w(TAG, "corner switch show failed: ${it.message}") }
-        }
-        sPendingShow = r
-        mainHandler.post(r)
-    }
-'''
-f.write_text(s[:start] + body + s[end:], encoding='utf-8')
-print('patched', turbo, '(corner show entry)')
-
-# Avoid legacy controller holding a second canvas on a corner gesture.
-# On hot reload the new overlay must be detached too.
-replace(turbo,
-    '            cancelPendingStripShow()\n            cancelStallTimer()\n            cancelAuthPoll()\n',
-    '            cancelPendingStripShow()\n            cornerSwitchMenu.dismiss()\n            cancelStallTimer()\n            cancelAuthPoll()\n')
-
-spy = hook + 'SystemUiInputSpy.kt'
-replace(spy,
-    '        return x <= cornerPx || x >= w - cornerPx\n',
-    '        return x >= w - cornerPx\n')
-
-# Respect the global enable switch at the SystemUI input-owner side before
-# pilfering. Otherwise turning off the module could still swallow corner swipes.
-replace(spy,
-    '''    private fun cornerSwipeEnabled(): Boolean = runCatching {
-        prefs?.getBoolean(
+# Original CornerTrigger; only scope/orientation/parameter adaptations.
+prefs = K+'prefs/PrefContract.kt'
+replace(prefs, '    const val ENABLED = "enabled"', '''    const val CORNER_HAPTIC = "corner_haptic"
+    const val CORNER_SENSITIVITY_DP = "cornerSensitivityDp"
+    const val CORNER_DIAG_ACTION = com.lsp.hypersidebar.BuildConfig.APPLICATION_ID + ".CORNER_DIAG"
+    const val ENABLED = "enabled"''')
+replace(prefs, 'object LayoutDefaults {', 'object LayoutDefaults {\n    const val CORNER_SENSITIVITY_DP = 12')
+replace(prefs, '    const val CORNER_SWIPE_ENABLED = false', '    const val CORNER_SWIPE_ENABLED = true')
+trigger = K+'hook/CornerTrigger.kt'
+replace(trigger, 'if (screenW <= 0f || screenH <= 0f || screenW >= screenH) return false', 'if (screenW <= 0f || screenH <= 0f) return false')
+replace(trigger, 'claimed = inBand && (leftCorner || x >= screenW - cornerWidth)', 'claimed = inBand && x >= screenW - cornerWidth')
+spy = K+'hook/SystemUiInputSpy.kt'
+replace(spy, '        if (w > h) return false\n        val gt =', '        if (w <= 0 || h <= 0) return false\n        val gt =')
+replace(spy, '        return x <= cornerPx || x >= w - cornerPx', '        return x >= w - cornerPx')
+replace(spy, '''        prefs?.getBoolean(
             com.lsp.hypersidebar.prefs.PrefKeys.CORNER_SWIPE_ENABLED,
             com.lsp.hypersidebar.prefs.LayoutDefaults.CORNER_SWIPE_ENABLED
-        ) ?: false
-    }.getOrDefault(false)
-''',
-    '''    private fun cornerSwipeEnabled(): Boolean = runCatching {
-        val p = prefs ?: return@runCatching false
-        p.getBoolean(com.lsp.hypersidebar.prefs.PrefKeys.ENABLED, true) &&
-            p.getBoolean(
-                com.lsp.hypersidebar.prefs.PrefKeys.CORNER_SWIPE_ENABLED,
-                com.lsp.hypersidebar.prefs.LayoutDefaults.CORNER_SWIPE_ENABLED
-            )
-    }.getOrDefault(false)
-''')
+        ) ?: false''', '''        val p = prefs ?: return@runCatching false
+        p.getBoolean(com.lsp.hypersidebar.prefs.PrefKeys.ENABLED, true) && p.getBoolean(
+            com.lsp.hypersidebar.prefs.PrefKeys.CORNER_SWIPE_ENABLED, true)''')
+for arg in ['confirmPx','inwardMinPx']:
+    replace(spy, f'{arg} = gt.CORNER_INWARD_MIN_DP * dm.density,', f'{arg} = (prefs?.getInt(com.lsp.hypersidebar.prefs.PrefKeys.CORNER_SENSITIVITY_DP, 12) ?: 12).coerceIn(8, 24) * dm.density,')
+turbo = K+'hook/TurboLayout.kt'
+replace(turbo, 'val cornerConfirmPx = GestureThresholds.CORNER_INWARD_MIN_DP * density', 'val cornerConfirmPx = remotePrefs.getInt(PrefKeys.CORNER_SENSITIVITY_DP, 12).coerceIn(8, 24) * density')
+replace(turbo, '                    GestureThresholds.CORNER_INWARD_MIN_DP * density,', '                    cornerConfirmPx,')
+replace(turbo, 'val anchorX = if (ev.rawX < dm.widthPixels / 2f) 0f else dm.widthPixels.toFloat()', 'val anchorX = dm.widthPixels.toFloat()')
+replace('app/src/main/cpp/hypersidebar_native.c',
+        '    int hit = (x <= edge || x >= w - edge) && (y >= yband);',
+        '    int hit = (x >= w - edge) && (y >= yband);')
 
-# InputMonitor only routes right-corner gestures (not the normal middle edge strip).
-replace(spy,
-    '        return y >= top && y <= top + bandH && nearSide\n',
-    '        return false // Right-corner-only build: disable middle edge trigger.\n')
+# No persistent probe/prewarm overlays. Never bypass obscured-touch security.
+replace(K+'hook/InsetProbe.kt', '        addOverlay(ctx)', '        // Miniwindow: no persistent inset-probe overlay.')
+controller = K+'ui/fan/FanMenuController.kt'
+def no_warmup(s):
+    a=s.index('    fun warmupAssembly(context: Context) {')
+    b=s.index('\n    fun hideAll()',a)
+    return s[:a]+'    fun warmupAssembly(context: Context) {\n        // DataLoader still preloads data/icons; no offscreen window is attached.\n    }\n'+s[b:]
+edit(controller,no_warmup)
+replace(controller, '    private fun assembleFanData(context: Context, cornerAnchor: Boolean = false): FanData {', '''    private fun assembleFanData(context: Context, cornerAnchor: Boolean = false): FanData {
+        if (cornerAnchor) return FanData(
+            MiniMenu.recommendations(context, DataLoader.rankedApps(context, frozenSource)),
+            emptyList(), emptyList(),
+            context.resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
+        )''')
+replace(controller, '            onAppSelected = { appInfo ->', '''            onAppSelected = miniApp@{ appInfo ->
+                if (MiniMenu.isControl(appInfo)) { hideAll(); return@miniApp }''')
 
-native = 'app/src/main/cpp/hypersidebar_native.c'
-replace(native,
-    '    int hit = (x <= edge || x >= w - edge) && (y >= yband);\n',
-    '    int hit = (x >= w - edge) && (y >= yband); // right corner only\n')
+# Change data in the SAME upstream host. Its motion dispatch, hit testing, geometry,
+# selection hysteresis, window lifecycle and native launch callbacks stay in place.
+host = K+'ui/fan/ComposeFanHost.kt'
+replace(host, '    private class GeometryInput(', '    private data class GeometryInput(')
+replace(host, '    private var built = false', '''    private var miniRecommendations: List<FanAppInfo> = emptyList()
+    private var miniFavorites = false
+    private var miniSwitchArmed = true
+    private var built = false''')
+replace(host, '        pendingInput = GeometryInput(anchorX, anchorY, apps, quickApps, isLandscape, cornerAnchor)', '''        miniRecommendations = if (cornerAnchor) apps else emptyList()
+        miniFavorites = false
+        miniSwitchArmed = true
+        pendingInput = GeometryInput(anchorX, anchorY, apps, quickApps, isLandscape, cornerAnchor)''')
+replace(host, '                        touchState.value = FanTouchState(x, y, 0, fanSel, quickSel)\n\n                        // 悬停展开组', '''                        if (pendingInput?.cornerAnchor == true) {
+                            val isSwitch = fanSel == 5
+                            if (!isSwitch) miniSwitchArmed = true
+                            if (isSwitch && miniSwitchArmed) {
+                                miniSwitchArmed = false
+                                miniFavorites = !miniFavorites
+                                pendingInput = pendingInput?.copy(apps = if (miniFavorites)
+                                    MiniMenu.favorites(context, prefs) else miniRecommendations)
+                                lastSelectedFanIndex = -1
+                                lastSelectedQuickIndex = -1
+                                touchState.value = FanTouchState(x, y, 0, -1, -1)
+                                computeAndPublishGeometry()
+                                return true
+                            }
+                            if (fanSel != prevFan && fanSel >= 0 && prefs.getBoolean(PrefKeys.CORNER_HAPTIC, true))
+                                performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
+                        }
+                        touchState.value = FanTouchState(x, y, 0, fanSel, quickSel)
 
-prefs = 'app/src/main/java/com/lsp/hypersidebar/prefs/PrefContract.kt'
-replace(prefs,
-    '    const val CORNER_SWIPE_ENABLED = false\n',
-    '    const val CORNER_SWIPE_ENABLED = true\n')
+                        // 悬停展开组''')
+replace(host, 'cornerMaxAppsOuter = readInt(PrefKeys.CORNER_MAX_APPS_OUTER, LayoutDefaults.CORNER_MAX_APPS_OUTER),', 'cornerMaxAppsOuter = 6,')
+replace(host, 'cornerMaxAppsInner = readInt(PrefKeys.CORNER_MAX_APPS_INNER, LayoutDefaults.CORNER_MAX_APPS_INNER)', 'cornerMaxAppsInner = 0')
+compose=K+'ui/fan/FanMenuCompose.kt'
+replace(compose,'            FanBoard(', '            if (!MiniMenu.isMenu(geometry.apps)) FanBoard(')
+replace(compose,'        AppIconImage(\n            bitmap = bitmap,', '''        if (MiniMenu.isControl(item.app)) {
+            if (item.app.packageName == MiniMenu.FOLDER || item.app.packageName == MiniMenu.BACK) {
+                Box(Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color(0xFF248AF5), androidx.compose.foundation.shape.CircleShape), contentAlignment = Alignment.Center) {
+                    Text(if (item.app.packageName == MiniMenu.FOLDER) "•••" else "↩", color = androidx.compose.ui.graphics.Color.White)
+                }
+            }
+        } else AppIconImage(
+            bitmap = bitmap,''')
 
-build = 'app/build.gradle.kts'
-replace(build,
-    'applicationId = "io.github.mikudayoooooooo.hypersidebar"',
-    'applicationId = "io.github.zzexnn.rightcornermini"')
-replace(build,
-    'versionName = "2.3.1"',
-    'versionName = "0.2.0-test"')
+# Keep upstream configuration channel; repair partial writes and attach context only.
+copy('NativeConfigValues.kt','util/')
+cf=K+'util/ConfigFileBridge.kt'
+replace(cf,'    private const val CONF_NAME = "hsb.conf"','    private const val CONF_NAME = "hsb.conf"\n    private val scalarValues = NativeConfigValues()')
+replace(cf,'    fun pushScalars(entries: Map<String, Any>): Boolean {','    @Synchronized fun pushScalars(entries: Map<String, Any>): Boolean {')
+replace(cf,'        val body = buildString {','        val merged = scalarValues.merge(entries)\n        val body = buildString {')
+replace(cf,'            entries.forEach { (k, v) ->','            merged.forEach { (k, v) ->')
+replace(K+'util/ConfigSync.kt','        hookCtx = context.applicationContext','        hookCtx = context')
+for name,dest in [('MiniMenu.kt','ui/fan/'),('MiniDiagnostics.kt','util/'),('CornerMiniSettingsScreen.kt','ui/settings/')]:
+    copy(name,dest)
+activity=K+'MainActivity.kt'
+replace(activity,'import com.lsp.hypersidebar.ui.settings.MainScreen','import com.lsp.hypersidebar.ui.settings.CornerMiniSettingsScreen')
+def settings(s):
+    a=s.index('                MainScreen(')
+    b=s.index('\n            }',a)
+    return s[:a]+'                CornerMiniSettingsScreen(activePrefs)'+s[b:]
+edit(activity,settings)
 
-strings = 'app/src/main/res/values/strings.xml'
-replace(strings,
-    '<string name="app_name">hyperSidebar</string>',
-    '<string name="app_name">右下角小窗（测试版）</string>')
-replace(strings,
-    '<string name="module_description">替换 HyperOS 原生侧边栏为双层半圆扇形摇杆菜单。侧滑唤醒，松手即小窗。</string>',
-    '<string name="module_description">右下角斜滑：常用应用 + 自定义收藏，原生小窗启动。</string>')
+# Read-only status/version receiver on existing setup points. No health-repair loop.
+replace(turbo,'    override fun rearmHostSide(ctx: Context) {','    override fun rearmHostSide(ctx: Context) {\n        com.lsp.hypersidebar.util.MiniDiagnostics.register(ctx, remotePrefs)')
+replace(K+'hook/SystemUiHook.kt','    private fun armHostSide(ctx: Context, via: String) {','    private fun armHostSide(ctx: Context, via: String) {\n        com.lsp.hypersidebar.util.MiniDiagnostics.register(ctx, prefs)')
+xposed=K+'XposedInit.kt'
+replace(xposed,'        installFor(host)\n    }', '''        installFor(host)
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            appContextOrNull()?.let { ctx ->
+                reloadTargets().forEach { (_, h) -> runCatching { h.rearmHostSide(ctx) } }
+                com.lsp.hypersidebar.util.MiniDiagnostics.register(ctx,
+                    com.lsp.hypersidebar.util.SyncedPrefs(hookSidePrefs()))
+                if (host == Host.SYSTEM_UI) runCatching {
+                    com.lsp.hypersidebar.hook.SystemUiInputSpy.start(ctx,
+                        com.lsp.hypersidebar.util.SyncedPrefs(hookSidePrefs()))
+                }
+            }
+        }
+    }''')
+replace(xposed,'        for ((n, h) in reloadTargets()) {','        com.lsp.hypersidebar.util.MiniDiagnostics.release()\n        for ((n, h) in reloadTargets()) {')
+restarter=K+'ui/settings/HostRestarter.kt'
+replace(restarter,'    /** IO 线程调用：','    fun restartSystemUi(): Result = restart(HOSTS.filter { it.pkg == HostPackages.SYSTEM_UI })\n\n    /** IO 线程调用：')
 
-# Replace the giant settings entry with a smaller page, still leveraging
-# the upstream application picker and existing preferences synchronization.
-replace('app/src/main/java/com/lsp/hypersidebar/MainActivity.kt',
-    'import com.lsp.hypersidebar.ui.settings.MainScreen',
-    'import com.lsp.hypersidebar.ui.settings.CornerMiniSettingsScreen')
-replace('app/src/main/java/com/lsp/hypersidebar/MainActivity.kt',
-    '''                MainScreen(
-                    prefs = activePrefs,
-                    service = xposedService,
-                    themeMode = themeMode,
-                    onThemeModeChange = { mode ->
-                        themeMode = mode
-                        activePrefs.savePref(PrefKeys.THEME_MODE, mode)
-                        fallbackPrefs.savePref(PrefKeys.THEME_MODE, mode)
-                    }
-                )
-''',
-    '                CornerMiniSettingsScreen(prefs = activePrefs)\n')
+replace(restarter, r'killCommand = "pids=\$(pidof ${HostPackages.SYSTEM_UI}); " +',
+        r'killCommand = "pids=\$(pidof ${HostPackages.SYSTEM_UI}); [ -n \"\$pids\" ] || exit 1; " +')
 
-# IMPORTANT: app selection and backend code remain in the MVP so the already working
-# CUSTOM_APPS/CUSTOM_APPS_ORDER selection and cross-process sync can be reused.
-print('\nPatch applied. Build with ./gradlew assembleDebug on an Android-enabled machine.')
-print('Favorite apps use the retained app-picker under 自定义收藏; capped at five in corner menu.')
 
-# Keep V0.2 repairs separate so every edit is checked against the pinned V0.1 output.
-exec(compile((SRC.parent / "apply_fixes.py").read_text(encoding="utf-8"), str(SRC.parent / "apply_fixes.py"), "exec"))
-exec(compile((SRC.parent / "apply_v03.py").read_text(encoding="utf-8"), str(SRC.parent / "apply_v03.py"), "exec"))
+for name in ['LICENSE','NOTICE']:
+    p=ROOT/'app/src/main/assets'/('RightCornerMiniWindow_'+name)
+    p.parent.mkdir(parents=True,exist_ok=True)
+    shutil.copyfile(HERE.parent/name,p)
+for rel,entry in changes.items():
+    p=ROOT/rel
+    if p.suffix in {'.kt','.kts','.c'} and not entry.get('added'):
+        p.write_text('// Modified for RightCornerMiniWindow V0.4; Apache-2.0 attribution in bundled NOTICE.\n'+p.read_text())
+    entry['after']=hashlib.sha256(p.read_bytes()).hexdigest()
+(ROOT/'miniwindow-changes.json').write_text(json.dumps(changes,ensure_ascii=False,indent=2)+'\n')
+print('Applied upstream adaptations:',len(changes),'files. No retired patch executed.')
